@@ -124,6 +124,8 @@
 
 #include "modplatform/ModIndex.h"
 #include "modplatform/flame/FlameAPI.h"
+#include "modplatform/modrinth/ModrinthAPI.h"
+#include "ui/pages/instance/ManagedPackPage.h"
 #include "modplatform/flame/FlameModIndex.h"
 
 #include "KonamiCode.h"
@@ -416,6 +418,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
     connect(ui->actionUndoTrashInstance, &QAction::triggered, this, &MainWindow::undoTrashInstance);
 
     setSelectedInstanceById(APPLICATION->settings()->get("SelectedInstance").toString());
+    checkManagedPackUpdates();
 
     // removing this looks stupid
     view->setFocus();
@@ -1631,6 +1634,21 @@ void MainWindow::on_actionKillInstance_triggered()
     }
 }
 
+void MainWindow::on_actionUpdateManagedPack_triggered()
+{
+    if (!m_selectedInstance) {
+        return;
+    }
+
+    auto it = m_managedPackUpdates.find(m_selectedInstance->id());
+    if (it == m_managedPackUpdates.end() || it->second.status != ManagedPackUpdate::Status::Available) {
+        return;
+    }
+
+    auto updatePage = std::unique_ptr<ManagedPackPage>(ManagedPackPage::createPage(m_selectedInstance, this));
+    updatePage->updatePack(it->second.downloadUrl, true, it->second.versionID, it->second.version);
+}
+
 void MainWindow::on_actionCreateInstanceShortcut_triggered()
 {
     if (!m_selectedInstance)
@@ -1674,6 +1692,7 @@ void MainWindow::instanceChanged(const QModelIndex& current, [[maybe_unused]] co
     if (m_selectedInstance) {
         ui->instanceToolBar->setEnabled(true);
         setInstanceActionsEnabled(true);
+        updateManagedPackAction();
         ui->actionLaunchInstance->setEnabled(m_selectedInstance->canLaunch());
 
         ui->actionKillInstance->setEnabled(m_selectedInstance->isRunning());
@@ -1781,6 +1800,135 @@ void MainWindow::setInstanceActionsEnabled(bool enabled)
     ui->actionDeleteInstance->setEnabled(enabled);
     ui->actionCopyInstance->setEnabled(enabled);
     ui->actionCreateInstanceShortcut->setEnabled(enabled);
+    if (!enabled) {
+        ui->actionUpdateManagedPack->setText(tr("No updates available"));
+        ui->actionUpdateManagedPack->setEnabled(false);
+    }
+}
+
+void MainWindow::updateManagedPackAction()
+{
+    if (!m_selectedInstance) {
+        ui->actionUpdateManagedPack->setText(tr("No updates available"));
+        ui->actionUpdateManagedPack->setEnabled(false);
+        return;
+    }
+
+    const auto it = m_managedPackUpdates.find(m_selectedInstance->id());
+    const auto status = it == m_managedPackUpdates.end() ? ManagedPackUpdate::Status::NoUpdates : it->second.status;
+
+    switch (status) {
+        case ManagedPackUpdate::Status::Checking:
+            ui->actionUpdateManagedPack->setText(tr("Checking for updates..."));
+            ui->actionUpdateManagedPack->setEnabled(false);
+            break;
+        case ManagedPackUpdate::Status::Failed:
+            ui->actionUpdateManagedPack->setText(tr("Couldn't get versions"));
+            ui->actionUpdateManagedPack->setEnabled(false);
+            break;
+        case ManagedPackUpdate::Status::Available:
+            ui->actionUpdateManagedPack->setText(tr("Update: %1").arg(it->second.version));
+            ui->actionUpdateManagedPack->setEnabled(true);
+            break;
+        case ManagedPackUpdate::Status::NoUpdates:
+            ui->actionUpdateManagedPack->setText(tr("No updates available"));
+            ui->actionUpdateManagedPack->setEnabled(false);
+            break;
+    }
+}
+
+void MainWindow::checkManagedPackUpdates()
+{
+    for (int i = 0; i < APPLICATION->instances()->count(); ++i) {
+        auto* instance = APPLICATION->instances()->at(i);
+        if (!instance->isManagedPack()) {
+            continue;
+        }
+
+        const auto type = instance->getManagedPackType();
+        if (type != "modrinth" &&
+            (type != "flame" || (APPLICATION->capabilities() & Application::SupportsFlame) == 0U)) {
+            instance->setUpdateAvailable(false);
+            continue;
+        }
+
+        const auto instanceID = instance->id();
+        const auto currentVersionID = instance->getManagedPackVersionID();
+        const auto currentVersionName = instance->getManagedPackVersionName();
+        m_managedPackUpdates[instanceID] = { .status = ManagedPackUpdate::Status::Checking };
+
+        auto setStatus = [this, instanceID](ManagedPackUpdate update) {
+            auto* currentInstance = APPLICATION->instances()->getInstanceById(instanceID);
+            if (!currentInstance) {
+                return;
+            }
+
+            currentInstance->setUpdateAvailable(update.status == ManagedPackUpdate::Status::Available);
+            m_managedPackUpdates.insert_or_assign(instanceID, std::move(update));
+            if (m_selectedInstance == currentInstance) {
+                updateManagedPackAction();
+            }
+        };
+
+        ResourceAPI::Callback<QVector<ModPlatform::IndexedVersion>> callbacks{};
+        callbacks.onSucceed = [setStatus, type, currentVersionID, currentVersionName](auto& versions) mutable {
+            ManagedPackUpdate update;
+            if (versions.isEmpty()) {
+                setStatus(std::move(update));
+                return;
+            }
+
+            const auto& latestVersion = versions.constFirst();
+            const bool isCurrent = type == "modrinth" ? latestVersion.version == currentVersionName
+                                                       : latestVersion.fileId.toString() == currentVersionID;
+            if (!isCurrent) {
+                update.status = ManagedPackUpdate::Status::Available;
+                update.version = latestVersion.version;
+                update.versionID = latestVersion.fileId.toString();
+                update.downloadUrl = QUrl(latestVersion.downloadUrl);
+            }
+            setStatus(std::move(update));
+        };
+        callbacks.onFail = [setStatus](const QString&, int) mutable {
+            ManagedPackUpdate update;
+            update.status = ManagedPackUpdate::Status::Failed;
+            setStatus(std::move(update));
+        };
+        callbacks.onAbort = [setStatus]() mutable {
+            ManagedPackUpdate update;
+            update.status = ManagedPackUpdate::Status::Failed;
+            setStatus(std::move(update));
+        };
+
+        const ResourceAPI::VersionSearchArgs args{
+            .pack = std::make_shared<ModPlatform::IndexedPack>(ModPlatform::IndexedPack{ .addonId = instance->getManagedPackID() }),
+            .mcVersions = {},
+            .loaders = {},
+            .resourceType = ModPlatform::ResourceType::Modpack,
+            .includeChangelog = false,
+        };
+        Task::Ptr task = type == "modrinth" ? ModrinthAPI::get().getProjectVersions(args, callbacks)
+                                                : FlameAPI::get().getProjectVersions(args, callbacks);
+        if (!task) {
+            ManagedPackUpdate update;
+            update.status = ManagedPackUpdate::Status::Failed;
+            setStatus(std::move(update));
+            continue;
+        }
+
+        connect(task.get(), &Task::succeeded, this, [this, instanceID, setStatus] {
+            const auto it = m_managedPackUpdates.find(instanceID);
+            if (it != m_managedPackUpdates.end() && it->second.status == ManagedPackUpdate::Status::Checking) {
+                ManagedPackUpdate update;
+                update.status = ManagedPackUpdate::Status::Failed;
+                setStatus(std::move(update));
+            }
+        });
+        m_managedPackUpdateTasks.emplace_back(task);
+        task->start();
+    }
+
+    updateManagedPackAction();
 }
 
 void MainWindow::refreshCurrentInstance()
