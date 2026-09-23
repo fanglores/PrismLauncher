@@ -485,6 +485,9 @@ set(API_SOURCES
     modplatform/EnsureMetadataTask.h
     modplatform/EnsureMetadataTask.cpp
 
+    modplatform/ManagedPackUpdateTask.h
+    modplatform/ManagedPackUpdateTask.cpp
+
     modplatform/CheckUpdateTask.h
 
     modplatform/flame/FlameAPI.h
@@ -1475,6 +1478,10 @@ endforeach()
 
 # Disable some warnings in main launcher target due to being present in a lot of places. TODO: Fix them.
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    foreach(target ${Launcher_TARGETS})
+        target_compile_options(${target} PRIVATE /wd4821)
+    endforeach()
+
     target_compile_options(Launcher_logic PRIVATE /wd4100) # C4100 - unused parameter
     target_compile_options(${Launcher_Name} PRIVATE /wd4100) # C4100 - unused parameter
 else()

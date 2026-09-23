@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <QFile>
+
 #include "Application.h"
 #include "Json.h"
 #include "net/NetJob.h"
@@ -77,7 +79,8 @@ Task::Ptr ResourceAPI::searchProjects(const SearchArgs& args, const Callback<QLi
 }
 
 Task::Ptr ResourceAPI::getProjectVersions(const VersionSearchArgs& args,
-                                          const Callback<QVector<ModPlatform::IndexedVersion>>& callbacks) const
+                                          const Callback<QVector<ModPlatform::IndexedVersion>>& callbacks,
+                                          MetaEntryPtr cacheEntry) const
 {
     auto versionsUrlOptional = getVersionsURL(args);
     if (!versionsUrlOptional.has_value()) {
@@ -85,26 +88,20 @@ Task::Ptr ResourceAPI::getProjectVersions(const VersionSearchArgs& args,
     }
 
     const auto& versionsUrl = versionsUrlOptional.value();
-
     auto netJob = makeShared<NetJob>(QString("%1::Versions").arg(args.pack->name), APPLICATION->network());
 
-    auto [action, response] = Net::ApiRequest::makeByteArray(versionsUrl);
-    netJob->addNetAction(action);
-
-    QObject::connect(netJob.get(), &NetJob::succeeded, netJob.get(), [this, response, callbacks, args] {
-        auto doc = Json::requireDocument(*response, "ResourceAPI::getProjectVersions");
+    auto processResponse = [this, callbacks, args](const QByteArray& response) {
+        auto doc = Json::requireDocument(response, "ResourceAPI::getProjectVersions");
         if (!doc) {
             qWarning() << "Error while parsing JSON response for getting versions:" << doc.error();
-            qWarning() << *response;
+            callbacks.onFail(doc.error(), -1);
             return;
         }
 
-        QVector<ModPlatform::IndexedVersion> unsortedVersions;
-        auto arr = doc->isObject() ? doc->object()["data"].toArray() : doc->array();
-
-        for (auto versionIter : arr) {
+        QVector<ModPlatform::IndexedVersion> versions;
+        const auto arr = doc->isObject() ? doc->object()["data"].toArray() : doc->array();
+        for (const auto& versionIter : arr) {
             auto obj = versionIter.toObject();
-
             auto fileRes = loadIndexedPackVersion(obj, args.resourceType);
             if (!fileRes) {
                 qWarning() << "Error while reading" << debugName() << "resource version:" << fileRes.error();
@@ -114,24 +111,34 @@ Task::Ptr ResourceAPI::getProjectVersions(const VersionSearchArgs& args,
             if (!file.addonId.isValid()) {
                 file.addonId = args.pack->addonId;
             }
-
-            if (file.fileId.isValid() && !file.downloadUrl.isEmpty()) {  // Heuristic to check if the returned value is valid
-                unsortedVersions.append(file);
+            if (file.fileId.isValid() && !file.downloadUrl.isEmpty()) {
+                versions.append(file);
             }
         }
 
-        auto orderSortPredicate = [](const ModPlatform::IndexedVersion& a, const ModPlatform::IndexedVersion& b) -> bool {
-            // dates are in RFC 3339 format
+        std::ranges::sort(versions, [](const ModPlatform::IndexedVersion& a, const ModPlatform::IndexedVersion& b) {
             return a.date > b.date;
-        };
-        std::ranges::sort(unsortedVersions, orderSortPredicate);
+        });
+        callbacks.onSucceed(versions);
+    };
 
-        callbacks.onSucceed(unsortedVersions);
-    });
+    if (cacheEntry) {
+        auto action = Net::ApiRequest::makeCached(versionsUrl, cacheEntry);
+        netJob->addNetAction(action);
+        QObject::connect(netJob.get(), &NetJob::succeeded, netJob.get(), [cacheEntry, processResponse] {
+            QFile cachedResponse(cacheEntry->getFullPath());
+            if (!cachedResponse.open(QIODevice::ReadOnly)) {
+                processResponse({});
+                return;
+            }
+            processResponse(cachedResponse.readAll());
+        });
+    } else {
+        auto [action, response] = Net::ApiRequest::makeByteArray(versionsUrl);
+        netJob->addNetAction(action);
+        QObject::connect(netJob.get(), &NetJob::succeeded, netJob.get(), [response, processResponse] { processResponse(*response); });
+    }
 
-    // Capture a weak_ptr instead of a shared_ptr to avoid circular dependency issues.
-    // This prevents the lambda from extending the lifetime of the shared resource,
-    // as it only temporarily locks the resource when needed.
     auto weak = netJob.toWeakRef();
     QObject::connect(netJob.get(), &NetJob::failed, netJob.get(), [weak, callbacks](const QString& reason) {
         int networkErrorCode = -1;

@@ -116,6 +116,9 @@
    </attribute>
    <addaction name="actionLaunchInstance"/>
    <addaction name="actionKillInstance"/>
+   <addaction name="actionCheckManagedPackUpdates"/>
+   <addaction name="actionUpdateManagedPack"/>
+   <addaction name="actionUpdateManagedPackFromFile"/>
    <addaction name="separator"/>
    <addaction name="actionEditInstance"/>
    <addaction name="actionChangeInstGroup"/>
@@ -393,6 +396,33 @@
    </property>
    <property name="toolTip">
     <string>Change the selected instance's icon.</string>
+   </property>
+  </action>
+  <action name="actionCheckManagedPackUpdates">
+   <property name="icon">
+    <iconset theme="refresh"/>
+   </property>
+   <property name="text">
+    <string>Check for updates</string>
+   </property>
+  </action>
+  <action name="actionUpdateManagedPackFromFile">
+   <property name="icon">
+    <iconset theme="document-open"/>
+   </property>
+   <property name="text">
+    <string>Update from file</string>
+   </property>
+  </action>
+  <action name="actionUpdateManagedPack">
+   <property name="icon">
+    <iconset theme="checkupdate"/>
+   </property>
+   <property name="text">
+    <string>Update</string>
+   </property>
+   <property name="toolTip">
+    <string>Update the selected modpack.</string>
    </property>
   </action>
   <action name="actionEditInstance">

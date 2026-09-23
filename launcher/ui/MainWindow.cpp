@@ -45,6 +45,7 @@
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QUrl>
@@ -61,6 +62,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLocale>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
@@ -72,6 +74,7 @@
 #include <QToolButton>
 #include <QWidget>
 #include <QWidgetAction>
+#include <limits>
 #include <memory>
 
 #include <BaseInstance.h>
@@ -109,6 +112,7 @@
 #include "ui/instanceview/InstanceDelegate.h"
 #include "ui/instanceview/InstanceProxyModel.h"
 #include "ui/instanceview/InstanceView.h"
+#include "ui/pages/instance/ManagedPackPage.h"
 #include "ui/themes/ITheme.h"
 #include "ui/themes/ThemeManager.h"
 #include "ui/widgets/LabeledToolButton.h"
@@ -122,10 +126,9 @@
 #include "minecraft/mod/TexturePackFolderModel.h"
 #include "minecraft/mod/tasks/LocalResourceParse.h"
 
+#include "modplatform/ManagedPackUpdateTask.h"
 #include "modplatform/ModIndex.h"
 #include "modplatform/flame/FlameAPI.h"
-#include "modplatform/modrinth/ModrinthAPI.h"
-#include "ui/pages/instance/ManagedPackPage.h"
 #include "modplatform/flame/FlameModIndex.h"
 
 #include "KonamiCode.h"
@@ -152,11 +155,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
 {
     ui->setupUi(this);
 
+    m_managedPackUpdateCacheTimer.setSingleShot(true);
+    connect(&m_managedPackUpdateCacheTimer, &QTimer::timeout, this, [this] { checkManagedPackUpdates(); });
+
     setWindowIcon(APPLICATION->logo());
     setWindowTitle(APPLICATION->applicationDisplayName());
 #ifndef QT_NO_ACCESSIBILITY
     setAccessibleName(BuildConfig.LAUNCHER_DISPLAYNAME);
 #endif
+
+    ui->instanceToolBar->setFixedWidth(240);
 
     // instance toolbar stuff
     {
@@ -180,7 +188,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         connect(renameButton, &QToolButton::clicked, this, &MainWindow::on_actionRenameInstance_triggered);
         ui->instanceToolBar->insertWidgetBefore(ui->actionLaunchInstance, renameButton);
 
+        m_managedPackLastCheckedLabel = new QLabel(this);
+        m_managedPackLastCheckedLabel->setStyleSheet("color: palette(mid);");
+        m_managedPackLastCheckedLabel->setWordWrap(true);
+        m_managedPackLastCheckedAction =
+            ui->instanceToolBar->insertWidgetBefore(ui->actionUpdateManagedPackFromFile, m_managedPackLastCheckedLabel);
+        m_managedPackLastCheckedAction->setVisible(false);
+
         ui->instanceToolBar->insertSeparator(ui->actionLaunchInstance);
+        m_managedPackUpdateSeparator = ui->instanceToolBar->insertSeparator(ui->actionCheckManagedPackUpdates);
+        m_managedPackUpdateSeparator->setVisible(false);
     }
 
     // set the menu for the folders help, accounts, and export tool buttons
@@ -417,13 +434,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
 
     connect(ui->actionUndoTrashInstance, &QAction::triggered, this, &MainWindow::undoTrashInstance);
 
+    retranslateUi();
     setSelectedInstanceById(APPLICATION->settings()->get("SelectedInstance").toString());
+    updateManagedPackAction();
     checkManagedPackUpdates();
 
     // removing this looks stupid
     view->setFocus();
-
-    retranslateUi();
 }
 
 // macOS always has a native menu bar, so these fixes are not applicable
@@ -456,6 +473,7 @@ void MainWindow::retranslateUi()
 
     changeIconButton->setToolTip(ui->actionChangeInstIcon->toolTip());
     renameButton->setToolTip(ui->actionRenameInstance->toolTip());
+    updateManagedPackAction();
 
     // replace the %1 with the launcher display name in some actions
     if (helpMenuButton->toolTip().contains("%1"))
@@ -1649,6 +1667,32 @@ void MainWindow::on_actionUpdateManagedPack_triggered()
     updatePage->updatePack(it->second.downloadUrl, true, it->second.versionID, it->second.version);
 }
 
+void MainWindow::on_actionCheckManagedPackUpdates_triggered()
+{
+    if (!m_selectedInstance || !m_selectedInstance->isManagedPack() ||
+        !ManagedPackUpdateTask::isSupportedRemote(m_selectedInstance->getManagedPackType(), m_selectedInstance->getManagedPackID(),
+                                                   (APPLICATION->capabilities() & Application::SupportsFlame) != 0U)) {
+        return;
+    }
+
+    startManagedPackUpdateTask({ m_selectedInstance }, true);
+}
+
+void MainWindow::on_actionUpdateManagedPackFromFile_triggered()
+{
+    if (!m_selectedInstance || !m_selectedInstance->isManagedPack() || !m_selectedInstance->getManagedPackID().isEmpty()) {
+        return;
+    }
+
+    const auto file = QFileDialog::getOpenFileUrl(this, tr("Choose update file"), QDir::homePath(), tr("Modpack") + " (*.mrpack *.zip)");
+    if (file.isEmpty()) {
+        return;
+    }
+
+    auto updatePage = std::unique_ptr<ManagedPackPage>(ManagedPackPage::createPage(m_selectedInstance, this));
+    updatePage->updatePack(file, false);
+}
+
 void MainWindow::on_actionCreateInstanceShortcut_triggered()
 {
     if (!m_selectedInstance)
@@ -1692,12 +1736,12 @@ void MainWindow::instanceChanged(const QModelIndex& current, [[maybe_unused]] co
     if (m_selectedInstance) {
         ui->instanceToolBar->setEnabled(true);
         setInstanceActionsEnabled(true);
-        updateManagedPackAction();
         ui->actionLaunchInstance->setEnabled(m_selectedInstance->canLaunch());
 
         ui->actionKillInstance->setEnabled(m_selectedInstance->isRunning());
         ui->actionExportInstance->setEnabled(m_selectedInstance->canExport());
         renameButton->setText(m_selectedInstance->name());
+        updateManagedPackAction();
         m_statusLeft->setText(m_selectedInstance->getStatusbarDescription());
         updateStatusCenter();
         updateInstanceToolIcon(m_selectedInstance->iconKey());
@@ -1739,6 +1783,7 @@ void MainWindow::selectionBad()
     ui->instanceToolBar->setEnabled(false);
     setInstanceActionsEnabled(false);
     updateLaunchButton();
+    updateManagedPackAction();
     renameButton->setText(tr("Rename Instance"));
     updateInstanceToolIcon("grass");
 
@@ -1800,6 +1845,8 @@ void MainWindow::setInstanceActionsEnabled(bool enabled)
     ui->actionDeleteInstance->setEnabled(enabled);
     ui->actionCopyInstance->setEnabled(enabled);
     ui->actionCreateInstanceShortcut->setEnabled(enabled);
+    ui->actionCheckManagedPackUpdates->setEnabled(false);
+    ui->actionUpdateManagedPackFromFile->setEnabled(false);
     if (!enabled) {
         ui->actionUpdateManagedPack->setText(tr("No updates available"));
         ui->actionUpdateManagedPack->setEnabled(false);
@@ -1808,18 +1855,50 @@ void MainWindow::setInstanceActionsEnabled(bool enabled)
 
 void MainWindow::updateManagedPackAction()
 {
-    if (!m_selectedInstance) {
-        ui->actionUpdateManagedPack->setText(tr("No updates available"));
-        ui->actionUpdateManagedPack->setEnabled(false);
+    const auto setHidden = [this] {
+        ui->instanceToolBar->setActionVisible(ui->actionUpdateManagedPack, false);
+        ui->instanceToolBar->setActionVisible(ui->actionCheckManagedPackUpdates, false);
+        ui->instanceToolBar->setActionVisible(ui->actionUpdateManagedPackFromFile, false);
+        m_managedPackLastCheckedAction->setVisible(false);
+        m_managedPackUpdateSeparator->setVisible(false);
+    };
+
+    if (!m_selectedInstance || !m_selectedInstance->isManagedPack()) {
+        setHidden();
+        return;
+    }
+
+    renameButton->setText(tr("%1\nVersion: %2").arg(m_selectedInstance->name(), m_selectedInstance->getManagedPackVersionName()));
+    const bool isLocal = m_selectedInstance->getManagedPackID().isEmpty();
+    const bool isRemote = ManagedPackUpdateTask::isSupportedRemote(
+        m_selectedInstance->getManagedPackType(), m_selectedInstance->getManagedPackID(),
+        (APPLICATION->capabilities() & Application::SupportsFlame) != 0U);
+    m_managedPackLastCheckedAction->setVisible(false);
+    m_managedPackUpdateSeparator->setVisible(isLocal || isRemote);
+    ui->instanceToolBar->setActionVisible(ui->actionUpdateManagedPackFromFile, isLocal);
+    ui->actionUpdateManagedPackFromFile->setEnabled(isLocal);
+    ui->instanceToolBar->setActionVisible(ui->actionUpdateManagedPack, isRemote);
+    ui->instanceToolBar->setActionVisible(ui->actionCheckManagedPackUpdates, isRemote);
+    if (!isRemote) {
         return;
     }
 
     const auto it = m_managedPackUpdates.find(m_selectedInstance->id());
     const auto status = it == m_managedPackUpdates.end() ? ManagedPackUpdate::Status::NoUpdates : it->second.status;
+    ui->actionCheckManagedPackUpdates->setText(tr("Check for updates"));
+    ui->actionCheckManagedPackUpdates->setEnabled(status != ManagedPackUpdate::Status::Checking &&
+                                                    !m_managedPackUpdateTask);
+    const auto lastChecked = it == m_managedPackUpdates.end() ? 0 : it->second.lastChecked;
+    const auto checkedAt = lastChecked == 0
+                               ? tr("never")
+                               : QLocale().toString(QDateTime::fromSecsSinceEpoch(lastChecked).toLocalTime(), QLocale::ShortFormat);
+    m_managedPackLastCheckedLabel->setText(tr("Last checked: %1").arg(checkedAt));
+    m_managedPackLastCheckedAction->setVisible(true);
 
     switch (status) {
         case ManagedPackUpdate::Status::Checking:
-            ui->actionUpdateManagedPack->setText(tr("Checking for updates..."));
+            ui->actionCheckManagedPackUpdates->setText(tr("Checking for updates..."));
+            ui->actionUpdateManagedPack->setText(tr("No updates available"));
             ui->actionUpdateManagedPack->setEnabled(false);
             break;
         case ManagedPackUpdate::Status::Failed:
@@ -1839,96 +1918,120 @@ void MainWindow::updateManagedPackAction()
 
 void MainWindow::checkManagedPackUpdates()
 {
+    if (m_managedPackUpdateTask) {
+        return;
+    }
+
+    QList<MinecraftInstance*> instances;
+    const auto now = QDateTime::currentSecsSinceEpoch();
     for (int i = 0; i < APPLICATION->instances()->count(); ++i) {
         auto* instance = APPLICATION->instances()->at(i);
-        if (!instance->isManagedPack()) {
-            continue;
-        }
-
         const auto type = instance->getManagedPackType();
-        if (type != "modrinth" &&
-            (type != "flame" || (APPLICATION->capabilities() & Application::SupportsFlame) == 0U)) {
+        if (!instance->isManagedPack() ||
+            !ManagedPackUpdateTask::isSupportedRemote(type, instance->getManagedPackID(),
+                                                       (APPLICATION->capabilities() & Application::SupportsFlame) != 0U)) {
             instance->setUpdateAvailable(false);
             continue;
         }
 
-        const auto instanceID = instance->id();
-        const auto currentVersionID = instance->getManagedPackVersionID();
-        const auto currentVersionName = instance->getManagedPackVersionName();
-        m_managedPackUpdates[instanceID] = { .status = ManagedPackUpdate::Status::Checking };
-
-        auto setStatus = [this, instanceID](ManagedPackUpdate update) {
-            auto* currentInstance = APPLICATION->instances()->getInstanceById(instanceID);
-            if (!currentInstance) {
-                return;
-            }
-
-            currentInstance->setUpdateAvailable(update.status == ManagedPackUpdate::Status::Available);
-            m_managedPackUpdates.insert_or_assign(instanceID, std::move(update));
-            if (m_selectedInstance == currentInstance) {
-                updateManagedPackAction();
-            }
-        };
-
-        ResourceAPI::Callback<QVector<ModPlatform::IndexedVersion>> callbacks{};
-        callbacks.onSucceed = [setStatus, type, currentVersionID, currentVersionName](auto& versions) mutable {
-            ManagedPackUpdate update;
-            if (versions.isEmpty()) {
-                setStatus(std::move(update));
-                return;
-            }
-
-            const auto& latestVersion = versions.constFirst();
-            const bool isCurrent = type == "modrinth" ? latestVersion.version == currentVersionName
-                                                       : latestVersion.fileId.toString() == currentVersionID;
-            if (!isCurrent) {
-                update.status = ManagedPackUpdate::Status::Available;
-                update.version = latestVersion.version;
-                update.versionID = latestVersion.fileId.toString();
-                update.downloadUrl = QUrl(latestVersion.downloadUrl);
-            }
-            setStatus(std::move(update));
-        };
-        callbacks.onFail = [setStatus](const QString&, int) mutable {
-            ManagedPackUpdate update;
-            update.status = ManagedPackUpdate::Status::Failed;
-            setStatus(std::move(update));
-        };
-        callbacks.onAbort = [setStatus]() mutable {
-            ManagedPackUpdate update;
-            update.status = ManagedPackUpdate::Status::Failed;
-            setStatus(std::move(update));
-        };
-
-        const ResourceAPI::VersionSearchArgs args{
-            .pack = std::make_shared<ModPlatform::IndexedPack>(ModPlatform::IndexedPack{ .addonId = instance->getManagedPackID() }),
-            .mcVersions = {},
-            .loaders = {},
-            .resourceType = ModPlatform::ResourceType::Modpack,
-            .includeChangelog = false,
-        };
-        Task::Ptr task = type == "modrinth" ? ModrinthAPI::get().getProjectVersions(args, callbacks)
-                                                : FlameAPI::get().getProjectVersions(args, callbacks);
-        if (!task) {
-            ManagedPackUpdate update;
-            update.status = ManagedPackUpdate::Status::Failed;
-            setStatus(std::move(update));
+        const auto cacheKey = type + '/' + instance->getManagedPackID();
+        if (m_managedPackUpdateExpirations.contains(cacheKey) && m_managedPackUpdateExpirations.at(cacheKey) > now) {
             continue;
         }
 
-        connect(task.get(), &Task::succeeded, this, [this, instanceID, setStatus] {
-            const auto it = m_managedPackUpdates.find(instanceID);
-            if (it != m_managedPackUpdates.end() && it->second.status == ManagedPackUpdate::Status::Checking) {
-                ManagedPackUpdate update;
-                update.status = ManagedPackUpdate::Status::Failed;
-                setStatus(std::move(update));
-            }
-        });
-        m_managedPackUpdateTasks.emplace_back(task);
-        task->start();
+        instances.append(instance);
     }
 
+    startManagedPackUpdateTask(instances, false);
+}
+
+void MainWindow::startManagedPackUpdateTask(const QList<MinecraftInstance*>& instances, bool forceRefresh)
+{
+    if (instances.isEmpty()) {
+        scheduleManagedPackUpdateChecks();
+        return;
+    }
+
+    if (m_managedPackUpdateTask) {
+        return;
+    }
+
+    QList<ManagedPackUpdateTask::Instance> snapshots;
+    for (const auto* instance : instances) {
+        auto& update = m_managedPackUpdates[instance->id()];
+        if (update.status == ManagedPackUpdate::Status::Checking) {
+            continue;
+        }
+        update.status = ManagedPackUpdate::Status::Checking;
+        snapshots.append({ instance->id(), instance->getManagedPackType(), instance->getManagedPackID(),
+                           instance->getManagedPackVersionID(), instance->getManagedPackVersionName() });
+    }
+
+    if (snapshots.isEmpty()) {
+        return;
+    }
+
+    auto task = makeShared<ManagedPackUpdateTask>(snapshots, forceRefresh);
+    connect(task.get(), &ManagedPackUpdateTask::updateChecked, this,
+            [this](const QString& instanceID, bool available, const QString& version, const QString& versionID, const QUrl& url,
+                   qint64 checkedAt) {
+                auto* instance = APPLICATION->instances()->getInstanceById(instanceID);
+                if (!instance) {
+                    return;
+                }
+                auto& update = m_managedPackUpdates[instanceID];
+                update = { .status = available ? ManagedPackUpdate::Status::Available : ManagedPackUpdate::Status::NoUpdates,
+                           .version = version, .versionID = versionID, .downloadUrl = url, .lastChecked = checkedAt };
+                instance->setUpdateAvailable(available);
+                if (instance == m_selectedInstance) {
+                    updateManagedPackAction();
+                }
+            });
+    connect(task.get(), &ManagedPackUpdateTask::checkFailed, this, [this](const QString& instanceID) {
+        auto* instance = APPLICATION->instances()->getInstanceById(instanceID);
+        if (!instance) {
+            return;
+        }
+        auto& update = m_managedPackUpdates[instanceID];
+        update.status = ManagedPackUpdate::Status::Failed;
+        update.lastChecked = QDateTime::currentSecsSinceEpoch();
+        m_managedPackUpdateExpirations[instance->getManagedPackType() + '/' + instance->getManagedPackID()] =
+            QDateTime::currentSecsSinceEpoch() + 5 * 60;
+        instance->setUpdateAvailable(false);
+        if (instance == m_selectedInstance) {
+            updateManagedPackAction();
+        }
+    });
+    connect(task.get(), &ManagedPackUpdateTask::cacheUpdated, this, [this](const QString& cacheKey, qint64 expiresAt) {
+        m_managedPackUpdateExpirations[cacheKey] = expiresAt;
+    });
+    connect(task.get(), &Task::finished, this, [this] {
+        QTimer::singleShot(0, this, [this] {
+            m_managedPackUpdateTask.reset();
+            updateManagedPackAction();
+            scheduleManagedPackUpdateChecks();
+        });
+    });
+
+    m_managedPackUpdateTask = task;
+    m_managedPackUpdateCacheTimer.stop();
     updateManagedPackAction();
+    task->start();
+}
+
+void MainWindow::scheduleManagedPackUpdateChecks()
+{
+    if (m_managedPackUpdateExpirations.empty() || m_managedPackUpdateTask) {
+        m_managedPackUpdateCacheTimer.stop();
+        return;
+    }
+
+    const auto now = QDateTime::currentSecsSinceEpoch();
+    const auto nextExpiry = std::ranges::min_element(m_managedPackUpdateExpirations, {}, [](const auto& entry) {
+                                return entry.second;
+                            })->second;
+    const auto intervalMs = std::min<qint64>(std::numeric_limits<int>::max(), std::max<qint64>(0, nextExpiry - now) * 1000);
+    m_managedPackUpdateCacheTimer.start(static_cast<int>(intervalMs));
 }
 
 void MainWindow::refreshCurrentInstance()

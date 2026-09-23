@@ -49,6 +49,7 @@
 #include "Result.h"
 #include "modplatform/ModIndex.h"
 #include "modplatform/ResourceType.h"
+#include "net/HttpMetaCache.h"
 #include "tasks/Task.h"
 
 /* Simple class with a common interface for interacting with APIs */
@@ -117,7 +118,9 @@ class ResourceAPI {
     virtual std::pair<Task::Ptr, QByteArray*> getProjects(QStringList addonIds) const = 0;
 
     virtual Task::Ptr getProjectInfo(const ProjectInfoArgs&, const Callback<ModPlatform::IndexedPack::Ptr>&, bool askRetry = true) const;
-    Task::Ptr getProjectVersions(const VersionSearchArgs& args, const Callback<QVector<ModPlatform::IndexedVersion>>& callbacks) const;
+    Task::Ptr getProjectVersions(const VersionSearchArgs& args,
+                                 const Callback<QVector<ModPlatform::IndexedVersion>>& callbacks,
+                                 MetaEntryPtr cacheEntry = {}) const;
     virtual Task::Ptr getDependencyVersion(const DependencySearchArgs&, const Callback<ModPlatform::IndexedVersion>&) const;
 
    protected:

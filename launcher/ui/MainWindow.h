@@ -40,14 +40,18 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
 
 #include <QMainWindow>
 #include <QProcess>
 #include <QTimer>
+#include <QUrl>
 
 #include "minecraft/auth/MinecraftAccount.h"
+#include "tasks/Task.h"
 
+class QAction;
 class LaunchController;
 class NewsChecker;
 class QToolButton;
@@ -152,6 +156,10 @@ class MainWindow : public QMainWindow {
 
     void on_actionKillInstance_triggered();
 
+    void on_actionUpdateManagedPack_triggered();
+    void on_actionCheckManagedPackUpdates_triggered();
+    void on_actionUpdateManagedPackFromFile_triggered();
+
     void on_actionDeleteInstance_triggered();
 
     void deleteGroup(QString group);
@@ -228,6 +236,10 @@ class MainWindow : public QMainWindow {
     void setSelectedInstanceById(const QString& id);
     void updateStatusCenter();
     void setInstanceActionsEnabled(bool enabled);
+    void checkManagedPackUpdates();
+    void startManagedPackUpdateTask(const QList<MinecraftInstance*>& instances, bool forceRefresh);
+    void updateManagedPackAction();
+    void scheduleManagedPackUpdateChecks();
 
     void runModalTask(Task* task);
     void instanceFromInstanceTask(InstanceTask* task);
@@ -240,6 +252,9 @@ class MainWindow : public QMainWindow {
     QToolButton* newsLabel = nullptr;
     QLabel* m_statusLeft = nullptr;
     QLabel* m_statusCenter = nullptr;
+    QLabel* m_managedPackLastCheckedLabel = nullptr;
+    QAction* m_managedPackLastCheckedAction = nullptr;
+    QAction* m_managedPackUpdateSeparator = nullptr;
     LabeledToolButton* changeIconButton = nullptr;
     LabeledToolButton* renameButton = nullptr;
     QToolButton* helpMenuButton = nullptr;
@@ -249,6 +264,21 @@ class MainWindow : public QMainWindow {
 
     MinecraftInstance* m_selectedInstance = nullptr;
     QString m_currentInstIcon;
+
+    struct ManagedPackUpdate {
+        enum class Status { Checking, Failed, NoUpdates, Available };
+
+        Status status = Status::NoUpdates;
+        QString version;
+        QString versionID;
+        QUrl downloadUrl;
+        qint64 lastChecked = 0;
+    };
+
+    std::map<QString, ManagedPackUpdate> m_managedPackUpdates;
+    Task::Ptr m_managedPackUpdateTask;
+    std::map<QString, qint64> m_managedPackUpdateExpirations;
+    QTimer m_managedPackUpdateCacheTimer;
 
     // managed by the application object
     Task* m_versionLoadTask = nullptr;
