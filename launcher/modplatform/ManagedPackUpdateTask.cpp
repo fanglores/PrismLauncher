@@ -92,6 +92,15 @@ void ManagedPackUpdateTask::enqueueManualCheck(Instance instance)
     m_queue.prepend({ instance.type, instance.packId, { std::move(instance) }, true });
 }
 
+void ManagedPackUpdateTask::prepareCacheEntry(MetaEntryPtr entry, bool forceRefresh)
+{
+    if (forceRefresh) {
+        entry->setStale(true);
+        entry->setETag({});
+        entry->setRemoteChangedTimestamp({});
+    }
+}
+
 bool ManagedPackUpdateTask::abort()
 {
     m_queue.clear();
@@ -122,9 +131,7 @@ void ManagedPackUpdateTask::checkNext()
     setStatus(tr("Checking modpack updates..."));
 
     const auto entry = APPLICATION->metacache()->resolveEntry("ManagedPackUpdates", cacheKey(project.type, project.packId) + ".json");
-    if (m_forceRefresh || project.forceRefresh) {
-        entry->setStale(true);
-    }
+    prepareCacheEntry(entry, m_forceRefresh || project.forceRefresh);
     m_currentRequestIsRemote = entry->isStale();
 
     ResourceAPI::Callback<QVector<ModPlatform::IndexedVersion>> callbacks{};

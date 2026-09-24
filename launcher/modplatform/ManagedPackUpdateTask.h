@@ -54,6 +54,7 @@ class ManagedPackUpdateTask final : public Task {
         bool forceRefresh = false;
     };
 
+    static void prepareCacheEntry(MetaEntryPtr entry, bool forceRefresh);
     void checkNext();
     void finishCurrent();
 

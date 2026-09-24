@@ -1,10 +1,23 @@
 #include "modplatform/ManagedPackUpdateTask.h"
 
 #include <QtTest>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QNetworkRequest>
 #include <QTemporaryDir>
+
+#include "net/MetaCacheSink.h"
+
+class InspectableMetaCacheSink : public Net::MetaCacheSink {
+   public:
+    explicit InspectableMetaCacheSink(MetaEntryPtr entry)
+        : Net::MetaCacheSink(std::move(entry), new Net::ChecksumValidator(QCryptographicHash::Md5))
+    {}
+
+    using Net::MetaCacheSink::initCache;
+};
 
 class ManagedPackUpdateTaskTest : public QObject {
     Q_OBJECT
@@ -59,6 +72,36 @@ class ManagedPackUpdateTaskTest : public QObject {
         QCOMPARE(task.m_queue.at(0).instances.constFirst().id, QString("checked"));
         QVERIFY(task.m_queue.at(0).forceRefresh);
         QCOMPARE(task.m_queue.at(1).type, QString("flame"));
+    }
+
+    void forcedCheckDownloadsWithoutConditionalCacheHeaders()
+    {
+        QTemporaryDir directory(QDir::current().filePath("managed-pack-versions-XXXXXX"));
+        QVERIFY(directory.isValid());
+        HttpMetaCache cache;
+        cache.addBase("ManagedPackUpdates", directory.path());
+        auto entry = cache.resolveEntry("ManagedPackUpdates", "modrinth/project.json");
+        QFile file(entry->getFullPath());
+        QVERIFY(QDir().mkpath(QFileInfo(file).path()));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("[]"), 2);
+        file.close();
+        entry->setStale(true);
+        entry->setETag("\"old-etag\"");
+        entry->setRemoteChangedTimestamp("Wed, 01 Jan 2025 00:00:00 GMT");
+
+        ManagedPackUpdateTask::prepareCacheEntry(entry, false);
+        InspectableMetaCacheSink sink(entry);
+        QNetworkRequest conditional(QUrl("https://example.org/versions"));
+        QCOMPARE(sink.initCache(conditional).value(), Net::Sink::InitType::Ok);
+        QCOMPARE(conditional.rawHeader("If-None-Match"), QByteArray("\"old-etag\""));
+        QVERIFY(conditional.hasRawHeader("If-Modified-Since"));
+
+        ManagedPackUpdateTask::prepareCacheEntry(entry, true);
+        QNetworkRequest full(QUrl("https://example.org/versions"));
+        QCOMPARE(sink.initCache(full).value(), Net::Sink::InitType::Ok);
+        QVERIFY(!full.hasRawHeader("If-None-Match"));
+        QVERIFY(!full.hasRawHeader("If-Modified-Since"));
     }
 
     void emptyQueueFinishesWithoutNetwork()
