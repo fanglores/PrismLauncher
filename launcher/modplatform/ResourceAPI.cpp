@@ -78,6 +78,38 @@ Task::Ptr ResourceAPI::searchProjects(const SearchArgs& args, const Callback<QLi
     return netJob;
 }
 
+Result<QVector<ModPlatform::IndexedVersion>> ResourceAPI::parseProjectVersions(const QByteArray& response,
+                                                                                const VersionSearchArgs& args) const
+{
+    auto doc = Json::requireDocument(response, "ResourceAPI::getProjectVersions");
+    if (!doc) {
+        return std::unexpected(doc.error());
+    }
+
+    QVector<ModPlatform::IndexedVersion> versions;
+    const auto arr = doc->isObject() ? doc->object()["data"].toArray() : doc->array();
+    for (const auto& versionIter : arr) {
+        auto obj = versionIter.toObject();
+        auto fileRes = loadIndexedPackVersion(obj, args.resourceType);
+        if (!fileRes) {
+            qWarning() << "Error while reading" << debugName() << "resource version:" << fileRes.error();
+            continue;
+        }
+        auto file = fileRes.value();
+        if (!file.addonId.isValid()) {
+            file.addonId = args.pack->addonId;
+        }
+        if (file.fileId.isValid() && !file.downloadUrl.isEmpty()) {
+            versions.append(file);
+        }
+    }
+
+    std::ranges::sort(versions, [](const ModPlatform::IndexedVersion& a, const ModPlatform::IndexedVersion& b) {
+        return a.date > b.date;
+    });
+    return versions;
+}
+
 Task::Ptr ResourceAPI::getProjectVersions(const VersionSearchArgs& args,
                                           const Callback<QVector<ModPlatform::IndexedVersion>>& callbacks,
                                           MetaEntryPtr cacheEntry) const
@@ -91,35 +123,13 @@ Task::Ptr ResourceAPI::getProjectVersions(const VersionSearchArgs& args,
     auto netJob = makeShared<NetJob>(QString("%1::Versions").arg(args.pack->name), APPLICATION->network());
 
     auto processResponse = [this, callbacks, args](const QByteArray& response) {
-        auto doc = Json::requireDocument(response, "ResourceAPI::getProjectVersions");
-        if (!doc) {
-            qWarning() << "Error while parsing JSON response for getting versions:" << doc.error();
-            callbacks.onFail(doc.error(), -1);
+        auto versions = parseProjectVersions(response, args);
+        if (!versions) {
+            qWarning() << "Error while parsing JSON response for getting versions:" << versions.error();
+            callbacks.onFail(versions.error(), -1);
             return;
         }
-
-        QVector<ModPlatform::IndexedVersion> versions;
-        const auto arr = doc->isObject() ? doc->object()["data"].toArray() : doc->array();
-        for (const auto& versionIter : arr) {
-            auto obj = versionIter.toObject();
-            auto fileRes = loadIndexedPackVersion(obj, args.resourceType);
-            if (!fileRes) {
-                qWarning() << "Error while reading" << debugName() << "resource version:" << fileRes.error();
-                continue;
-            }
-            auto file = fileRes.value();
-            if (!file.addonId.isValid()) {
-                file.addonId = args.pack->addonId;
-            }
-            if (file.fileId.isValid() && !file.downloadUrl.isEmpty()) {
-                versions.append(file);
-            }
-        }
-
-        std::ranges::sort(versions, [](const ModPlatform::IndexedVersion& a, const ModPlatform::IndexedVersion& b) {
-            return a.date > b.date;
-        });
-        callbacks.onSucceed(versions);
+        callbacks.onSucceed(*versions);
     };
 
     if (cacheEntry) {

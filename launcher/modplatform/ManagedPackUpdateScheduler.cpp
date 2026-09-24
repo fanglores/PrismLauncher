@@ -78,10 +78,10 @@ std::optional<ManagedPackUpdateScheduler::Result> ManagedPackUpdateScheduler::re
     return value;
 }
 
-bool ManagedPackUpdateScheduler::needsCheck(const QString& cacheKey, qint64 now)
+bool ManagedPackUpdateScheduler::needsCheck(const QString& cacheKey, qint64 now, bool forceRefresh)
 {
     const auto cached = result(cacheKey);
-    return !cached || cached->checkedAt + CacheLifetimeSecs <= now;
+    return forceRefresh || !cached || cached->checkedAt + CacheLifetimeSecs <= now;
 }
 
 void ManagedPackUpdateScheduler::recordResult(const QString& cacheKey, bool success, qint64 checkedAt)

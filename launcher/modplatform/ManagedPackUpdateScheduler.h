@@ -26,7 +26,7 @@ class ManagedPackUpdateScheduler : public QObject {
 
     void setCacheDirectory(QString path);
     std::optional<Result> result(const QString& cacheKey);
-    bool needsCheck(const QString& cacheKey, qint64 now = QDateTime::currentSecsSinceEpoch());
+    bool needsCheck(const QString& cacheKey, qint64 now = QDateTime::currentSecsSinceEpoch(), bool forceRefresh = false);
     void recordResult(const QString& cacheKey, bool success, qint64 checkedAt);
     void retainProjects(const std::set<QString>& cacheKeys);
     void setBusy(bool busy);

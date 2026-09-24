@@ -6,8 +6,10 @@
 #include <QQueue>
 #include <QString>
 #include <QUrl>
+#include <optional>
 
 #include "modplatform/ModIndex.h"
+#include "net/HttpMetaCache.h"
 #include "tasks/Task.h"
 
 class ManagedPackUpdateTask final : public Task {
@@ -27,6 +29,8 @@ class ManagedPackUpdateTask final : public Task {
 
     static bool isSupportedRemote(const QString& type, const QString& packId, bool flameSupported);
     static bool hasUpdate(const Instance& instance, const ModPlatform::IndexedVersion& latest);
+    static std::optional<QVector<ModPlatform::IndexedVersion>> cachedVersions(const Instance& instance, MetaEntryPtr entry);
+    void enqueueManualCheck(Instance instance);
 
    public slots:
     bool abort() override;
@@ -47,6 +51,7 @@ class ManagedPackUpdateTask final : public Task {
         QString type;
         QString packId;
         QList<Instance> instances;
+        bool forceRefresh = false;
     };
 
     void checkNext();

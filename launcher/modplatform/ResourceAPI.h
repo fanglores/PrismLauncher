@@ -121,6 +121,7 @@ class ResourceAPI {
     Task::Ptr getProjectVersions(const VersionSearchArgs& args,
                                  const Callback<QVector<ModPlatform::IndexedVersion>>& callbacks,
                                  MetaEntryPtr cacheEntry = {}) const;
+    Result<QVector<ModPlatform::IndexedVersion>> parseProjectVersions(const QByteArray& response, const VersionSearchArgs& args) const;
     virtual Task::Ptr getDependencyVersion(const DependencySearchArgs&, const Callback<ModPlatform::IndexedVersion>&) const;
 
    protected:

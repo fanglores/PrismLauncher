@@ -2,7 +2,10 @@
 
 #include "ManagedPackUpdateTask.h"
 
+#include <algorithm>
+
 #include <QDateTime>
+#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QTimer>
@@ -21,6 +24,15 @@ QString cacheKey(const QString& type, const QString& packId)
 {
     return type + '/' + packId;
 }
+
+ResourceAPI::VersionSearchArgs versionArgs(const QString& packId)
+{
+    return { .pack = std::make_shared<ModPlatform::IndexedPack>(ModPlatform::IndexedPack{ .addonId = packId }),
+             .mcVersions = {},
+             .loaders = {},
+             .resourceType = ModPlatform::ResourceType::Modpack,
+             .includeChangelog = false };
+}
 }
 
 bool ManagedPackUpdateTask::isSupportedRemote(const QString& type, const QString& packId, bool flameSupported)
@@ -31,7 +43,23 @@ bool ManagedPackUpdateTask::isSupportedRemote(const QString& type, const QString
 bool ManagedPackUpdateTask::hasUpdate(const Instance& instance, const ModPlatform::IndexedVersion& latest)
 {
     return instance.type == "modrinth" ? latest.version != instance.versionName
-                                       : latest.fileId.toString() != instance.versionId;
+                                        : latest.fileId.toString() != instance.versionId;
+}
+
+std::optional<QVector<ModPlatform::IndexedVersion>> ManagedPackUpdateTask::cachedVersions(const Instance& instance,
+                                                                                          MetaEntryPtr entry)
+{
+    if (!entry || entry->isStale()) {
+        return std::nullopt;
+    }
+    QFile file(entry->getFullPath());
+    if (!file.open(QIODevice::ReadOnly)) {
+        return std::nullopt;
+    }
+    const auto& api = instance.type == "modrinth" ? static_cast<const ResourceAPI&>(ModrinthAPI::get())
+                                                   : static_cast<const ResourceAPI&>(FlameAPI::get());
+    const auto versions = api.parseProjectVersions(file.readAll(), versionArgs(instance.packId));
+    return versions ? std::optional(*versions) : std::nullopt;
 }
 
 ManagedPackUpdateTask::ManagedPackUpdateTask(QList<Instance> instances, bool forceRefresh) : m_forceRefresh(forceRefresh)
@@ -45,6 +73,23 @@ ManagedPackUpdateTask::ManagedPackUpdateTask(QList<Instance> instances, bool for
         }
         m_queue[projects.value(key)].instances.append(std::move(instance));
     }
+}
+
+void ManagedPackUpdateTask::enqueueManualCheck(Instance instance)
+{
+    for (int i = 0; i < m_queue.size(); ++i) {
+        if (m_queue[i].type != instance.type || m_queue[i].packId != instance.packId) {
+            continue;
+        }
+        auto project = m_queue.takeAt(i);
+        if (std::ranges::none_of(project.instances, [&instance](const auto& queued) { return queued.id == instance.id; })) {
+            project.instances.append(std::move(instance));
+        }
+        project.forceRefresh = true;
+        m_queue.prepend(std::move(project));
+        return;
+    }
+    m_queue.prepend({ instance.type, instance.packId, { std::move(instance) }, true });
 }
 
 bool ManagedPackUpdateTask::abort()
@@ -77,7 +122,7 @@ void ManagedPackUpdateTask::checkNext()
     setStatus(tr("Checking modpack updates..."));
 
     const auto entry = APPLICATION->metacache()->resolveEntry("ManagedPackUpdates", cacheKey(project.type, project.packId) + ".json");
-    if (m_forceRefresh) {
+    if (m_forceRefresh || project.forceRefresh) {
         entry->setStale(true);
     }
     m_currentRequestIsRemote = entry->isStale();
@@ -112,13 +157,7 @@ void ManagedPackUpdateTask::checkNext()
     callbacks.onFail = [failProject](const QString&, int) { failProject(); };
     callbacks.onAbort = failProject;
 
-    const ResourceAPI::VersionSearchArgs args{
-        .pack = std::make_shared<ModPlatform::IndexedPack>(ModPlatform::IndexedPack{ .addonId = project.packId }),
-        .mcVersions = {},
-        .loaders = {},
-        .resourceType = ModPlatform::ResourceType::Modpack,
-        .includeChangelog = false,
-    };
+    const auto args = versionArgs(project.packId);
     m_currentTask = project.type == "modrinth" ? ModrinthAPI::get().getProjectVersions(args, callbacks, entry)
                                                  : FlameAPI::get().getProjectVersions(args, callbacks, entry);
     if (!m_currentTask) {

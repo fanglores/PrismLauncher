@@ -60,6 +60,7 @@ class LabeledToolButton;
 class QLabel;
 class MinecraftInstance;
 class MinecraftLauncher;
+class ManagedPackUpdateTask;
 class BaseProfilerFactory;
 class InstanceView;
 class KonamiCode;
@@ -236,7 +237,7 @@ class MainWindow : public QMainWindow {
     void setSelectedInstanceById(const QString& id);
     void updateStatusCenter();
     void setInstanceActionsEnabled(bool enabled);
-    void checkManagedPackUpdates();
+    void checkManagedPackUpdates(bool forceRefresh = false);
     void startManagedPackUpdateTask(const QList<MinecraftInstance*>& instances, bool forceRefresh);
     void updateManagedPackAction();
 
@@ -265,7 +266,7 @@ class MainWindow : public QMainWindow {
     QString m_currentInstIcon;
 
     struct ManagedPackUpdate {
-        enum class Status { Checking, Failed, NoUpdates, Available };
+        enum class Status { Checking, CheckingWithUpdate, Failed, NoUpdates, Available };
 
         Status status = Status::NoUpdates;
         QString version;
@@ -276,7 +277,7 @@ class MainWindow : public QMainWindow {
     };
 
     std::map<QString, ManagedPackUpdate> m_managedPackUpdates;
-    Task::Ptr m_managedPackUpdateTask;
+    shared_qobject_ptr<ManagedPackUpdateTask> m_managedPackUpdateTask;
     ManagedPackUpdateScheduler m_managedPackUpdateScheduler;
 
     // managed by the application object

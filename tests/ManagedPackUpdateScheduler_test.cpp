@@ -85,6 +85,21 @@ class ManagedPackUpdateSchedulerTest : public QObject {
         QVERIFY(!scheduler.needsCheck(key));
     }
 
+    void startupRefreshBypassesFreshResults()
+    {
+        ManagedPackUpdateScheduler scheduler;
+        QSignalSpy due(&scheduler, &ManagedPackUpdateScheduler::checkDue);
+        const auto now = QDateTime::currentSecsSinceEpoch();
+
+        scheduler.recordResult("modrinth/success", true, now);
+        scheduler.recordResult("flame/failure", false, now);
+        for (const auto& key : { "modrinth/success", "flame/failure" }) {
+            QVERIFY(!scheduler.needsCheck(key, now));
+            QVERIFY(scheduler.needsCheck(key, now, true));
+        }
+        QCOMPARE(due.size(), 0);
+    }
+
     void resultsAreSharedAcrossRestarts()
     {
         QTemporaryDir directory(QDir::current().filePath("managed-pack-updates-XXXXXX"));

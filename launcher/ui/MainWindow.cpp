@@ -142,6 +142,13 @@
 #include "MMCTime.h"
 
 namespace {
+class MainWindowManagedPackPage : public ManagedPackPage {
+   public:
+    MainWindowManagedPackPage(BaseInstance* instance, QWidget* parent) : ManagedPackPage(instance, nullptr, parent) {}
+
+    using ManagedPackPage::updatePack;
+};
+
 QString profileInUseFilter(const QString& profile, bool used)
 {
     if (used) {
@@ -157,7 +164,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
     ui->setupUi(this);
 
     m_managedPackUpdateScheduler.setCacheDirectory(APPLICATION->metacache()->getBasePath("ManagedPackUpdates"));
-    connect(&m_managedPackUpdateScheduler, &ManagedPackUpdateScheduler::checkDue, this, &MainWindow::checkManagedPackUpdates);
+    connect(&m_managedPackUpdateScheduler, &ManagedPackUpdateScheduler::checkDue, this, [this] { checkManagedPackUpdates(); });
 
     setWindowIcon(APPLICATION->logo());
     setWindowTitle(APPLICATION->applicationDisplayName());
@@ -438,7 +445,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
     retranslateUi();
     setSelectedInstanceById(APPLICATION->settings()->get("SelectedInstance").toString());
     updateManagedPackAction();
-    checkManagedPackUpdates();
+    checkManagedPackUpdates(true);
 
     // removing this looks stupid
     view->setFocus();
@@ -1660,12 +1667,14 @@ void MainWindow::on_actionUpdateManagedPack_triggered()
     }
 
     auto it = m_managedPackUpdates.find(m_selectedInstance->id());
-    if (it == m_managedPackUpdates.end() || it->second.status != ManagedPackUpdate::Status::Available) {
+    if (it == m_managedPackUpdates.end() ||
+        (it->second.status != ManagedPackUpdate::Status::Available &&
+         it->second.status != ManagedPackUpdate::Status::CheckingWithUpdate)) {
         return;
     }
 
-    auto updatePage = std::unique_ptr<ManagedPackPage>(ManagedPackPage::createPage(m_selectedInstance, this));
-    updatePage->updatePack(it->second.downloadUrl, true, it->second.versionID, it->second.version);
+    MainWindowManagedPackPage updatePage(m_selectedInstance, this);
+    updatePage.updatePack(it->second.downloadUrl, true, it->second.versionID, it->second.version);
 }
 
 void MainWindow::on_actionCheckManagedPackUpdates_triggered()
@@ -1676,6 +1685,20 @@ void MainWindow::on_actionCheckManagedPackUpdates_triggered()
         return;
     }
 
+    if (m_managedPackUpdateTask && m_managedPackUpdateTask->isRunning()) {
+        auto& update = m_managedPackUpdates[m_selectedInstance->id()];
+        if (update.status == ManagedPackUpdate::Status::Checking ||
+            update.status == ManagedPackUpdate::Status::CheckingWithUpdate) {
+            return;
+        }
+        m_managedPackUpdateTask->enqueueManualCheck(
+            { m_selectedInstance->id(), m_selectedInstance->getManagedPackType(), m_selectedInstance->getManagedPackID(),
+              m_selectedInstance->getManagedPackVersionID(), m_selectedInstance->getManagedPackVersionName() });
+        update.status = update.status == ManagedPackUpdate::Status::Available ? ManagedPackUpdate::Status::CheckingWithUpdate
+                                                                             : ManagedPackUpdate::Status::Checking;
+        updateManagedPackAction();
+        return;
+    }
     startManagedPackUpdateTask({ m_selectedInstance }, true);
 }
 
@@ -1690,8 +1713,8 @@ void MainWindow::on_actionUpdateManagedPackFromFile_triggered()
         return;
     }
 
-    auto updatePage = std::unique_ptr<ManagedPackPage>(ManagedPackPage::createPage(m_selectedInstance, this));
-    updatePage->updatePack(file, false);
+    MainWindowManagedPackPage updatePage(m_selectedInstance, this);
+    updatePage.updatePack(file, false);
 }
 
 void MainWindow::on_actionCreateInstanceShortcut_triggered()
@@ -1886,22 +1909,30 @@ void MainWindow::updateManagedPackAction()
 
     const auto it = m_managedPackUpdates.find(m_selectedInstance->id());
     const auto status = it == m_managedPackUpdates.end() ? ManagedPackUpdate::Status::NoUpdates : it->second.status;
-    ui->actionCheckManagedPackUpdates->setText(tr("Check for updates"));
-    ui->actionCheckManagedPackUpdates->setEnabled(status != ManagedPackUpdate::Status::Checking &&
-                                                    !m_managedPackUpdateTask);
-    const auto lastChecked = it == m_managedPackUpdates.end() ? 0 : it->second.lastChecked;
+    const bool checking = status == ManagedPackUpdate::Status::Checking ||
+                          status == ManagedPackUpdate::Status::CheckingWithUpdate;
+    ui->actionCheckManagedPackUpdates->setText(checking ? tr("Checking for updates...") : tr("Check for updates"));
+    ui->actionCheckManagedPackUpdates->setEnabled(!checking &&
+                                                   (!m_managedPackUpdateTask || m_managedPackUpdateTask->isRunning()));
+    const auto cached = m_managedPackUpdateScheduler.result(m_selectedInstance->getManagedPackType() + '/' +
+                                                             m_selectedInstance->getManagedPackID());
+    const auto lastChecked = it != m_managedPackUpdates.end() && it->second.lastChecked != 0
+                                 ? it->second.lastChecked
+                                 : cached ? cached->checkedAt : 0;
+    const bool lastCheckFailed = it != m_managedPackUpdates.end() && it->second.lastChecked != 0
+                                     ? it->second.lastCheckFailed
+                                     : cached && !cached->success;
     QString checkedAt = tr("never");
-    if (it != m_managedPackUpdates.end() && it->second.lastCheckFailed) {
+    if (lastCheckFailed) {
         checkedAt = tr("failed");
     } else if (lastChecked != 0) {
-        checkedAt = QLocale().toString(QDateTime::fromSecsSinceEpoch(lastChecked).toLocalTime(), QLocale::ShortFormat);
+        checkedAt = QLocale().toString(QDateTime::fromSecsSinceEpoch(lastChecked).toLocalTime(), "d MMM HH:mm");
     }
     m_managedPackLastCheckedLabel->setText(tr("Last checked: %1").arg(checkedAt));
     m_managedPackLastCheckedAction->setVisible(true);
 
     switch (status) {
         case ManagedPackUpdate::Status::Checking:
-            ui->actionCheckManagedPackUpdates->setText(tr("Checking for updates..."));
             ui->actionUpdateManagedPack->setText(tr("No updates available"));
             ui->actionUpdateManagedPack->setEnabled(false);
             break;
@@ -1909,6 +1940,7 @@ void MainWindow::updateManagedPackAction()
             ui->actionUpdateManagedPack->setText(tr("Couldn't get versions"));
             ui->actionUpdateManagedPack->setEnabled(false);
             break;
+        case ManagedPackUpdate::Status::CheckingWithUpdate:
         case ManagedPackUpdate::Status::Available:
             ui->actionUpdateManagedPack->setText(tr("Update: %1").arg(it->second.version));
             ui->actionUpdateManagedPack->setEnabled(true);
@@ -1920,7 +1952,7 @@ void MainWindow::updateManagedPackAction()
     }
 }
 
-void MainWindow::checkManagedPackUpdates()
+void MainWindow::checkManagedPackUpdates(bool forceRefresh)
 {
     if (m_managedPackUpdateTask) {
         return;
@@ -1928,6 +1960,7 @@ void MainWindow::checkManagedPackUpdates()
 
     QList<MinecraftInstance*> instances;
     std::set<QString> cacheKeys;
+    std::map<QString, std::optional<QVector<ModPlatform::IndexedVersion>>> cachedVersions;
     const auto now = QDateTime::currentSecsSinceEpoch();
     for (int i = 0; i < APPLICATION->instances()->count(); ++i) {
         auto* instance = APPLICATION->instances()->at(i);
@@ -1942,7 +1975,32 @@ void MainWindow::checkManagedPackUpdates()
         const auto cacheKey = type + '/' + instance->getManagedPackID();
         cacheKeys.insert(cacheKey);
         const auto cached = m_managedPackUpdateScheduler.result(cacheKey);
-        const bool checkDue = m_managedPackUpdateScheduler.needsCheck(cacheKey, now);
+        if (cached && cached->success && !m_managedPackUpdates.contains(instance->id())) {
+            const ManagedPackUpdateTask::Instance snapshot{ instance->id(), type, instance->getManagedPackID(),
+                                                            instance->getManagedPackVersionID(), instance->getManagedPackVersionName() };
+            auto versions = cachedVersions.find(cacheKey);
+            if (versions == cachedVersions.end()) {
+                auto entry = APPLICATION->metacache()->resolveEntry("ManagedPackUpdates", cacheKey + ".json");
+                versions = cachedVersions.emplace(cacheKey, ManagedPackUpdateTask::cachedVersions(snapshot, entry)).first;
+            }
+            if (versions->second) {
+                auto& update = m_managedPackUpdates[instance->id()];
+                update.lastChecked = cached->checkedAt;
+                if (!versions->second->isEmpty()) {
+                    const auto& latest = versions->second->constFirst();
+                    const bool available = ManagedPackUpdateTask::hasUpdate(snapshot, latest);
+                    update.status = available ? ManagedPackUpdate::Status::Available : ManagedPackUpdate::Status::NoUpdates;
+                    update.version = latest.version;
+                    update.versionID = latest.fileId.toString();
+                    update.downloadUrl = QUrl(latest.downloadUrl);
+                    instance->setUpdateAvailable(available);
+                }
+                if (instance == m_selectedInstance) {
+                    updateManagedPackAction();
+                }
+            }
+        }
+        const bool checkDue = m_managedPackUpdateScheduler.needsCheck(cacheKey, now, forceRefresh);
         if (cached && !cached->success && !checkDue) {
             auto& update = m_managedPackUpdates[instance->id()];
             update.status = ManagedPackUpdate::Status::Failed;
@@ -1962,7 +2020,7 @@ void MainWindow::checkManagedPackUpdates()
     }
 
     m_managedPackUpdateScheduler.retainProjects(cacheKeys);
-    startManagedPackUpdateTask(instances, false);
+    startManagedPackUpdateTask(instances, forceRefresh);
 }
 
 void MainWindow::startManagedPackUpdateTask(const QList<MinecraftInstance*>& instances, bool forceRefresh)
@@ -1978,10 +2036,12 @@ void MainWindow::startManagedPackUpdateTask(const QList<MinecraftInstance*>& ins
     QList<ManagedPackUpdateTask::Instance> snapshots;
     for (const auto* instance : instances) {
         auto& update = m_managedPackUpdates[instance->id()];
-        if (update.status == ManagedPackUpdate::Status::Checking) {
+        if (update.status == ManagedPackUpdate::Status::Checking ||
+            update.status == ManagedPackUpdate::Status::CheckingWithUpdate) {
             continue;
         }
-        update.status = ManagedPackUpdate::Status::Checking;
+        update.status = update.status == ManagedPackUpdate::Status::Available ? ManagedPackUpdate::Status::CheckingWithUpdate
+                                                                             : ManagedPackUpdate::Status::Checking;
         snapshots.append({ instance->id(), instance->getManagedPackType(), instance->getManagedPackID(),
                            instance->getManagedPackVersionID(), instance->getManagedPackVersionName() });
     }
