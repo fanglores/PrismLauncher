@@ -123,16 +123,18 @@ void drawProgressOverlay(QPainter* painter, const QStyleOptionViewItem& option, 
     painter->restore();
 }
 
-void drawBadges(QPainter* painter, const QStyleOptionViewItem& option, BaseInstance* instance, QIcon::Mode mode, QIcon::State state)
+void drawBadges(QPainter* painter,
+                const QStyleOptionViewItem& option,
+                BaseInstance* instance,
+                const QRect& instanceIconRect,
+                QIcon::Mode mode,
+                QIcon::State state)
 {
     QList<QString> pixmaps;
     if (instance->isRunning()) {
         pixmaps.append("status-running");
     } else if (instance->hasCrashed() || instance->hasVersionBroken()) {
         pixmaps.append("status-bad");
-    }
-    if (instance->hasUpdateAvailable()) {
-        pixmaps.append("checkupdate");
     }
 
     static const int itemSide = 24;
@@ -144,19 +146,24 @@ void drawBadges(QPainter* painter, const QStyleOptionViewItem& option, BaseInsta
     for (int y = 0; y < rows; ++y) {
         for (int x = 0; x < itemsPerRow; ++x) {
             if (!it.hasNext()) {
-                return;
+                break;
             }
-            // FIXME: inject this.
             auto icon = QIcon::fromTheme(it.next());
-            // opt.icon.paint(painter, iconbox, Qt::AlignCenter, mode, state);
-            const QPixmap pixmap;
-            // itemSide
             QRect badgeRect(option.rect.width() - x * itemSide + qMax(x - 1, 0) * spacing - itemSide,
                             y * itemSide + qMax(y - 1, 0) * spacing, itemSide, itemSide);
             icon.paint(painter, badgeRect, Qt::AlignCenter, mode, state);
         }
     }
     painter->translate(-option.rect.topLeft());
+
+    if (instance->hasUpdateAvailable()) {
+        static const int updateSide = 20;
+        const QRect updateRect(instanceIconRect.right() - updateSide + 1 + updateSide * 7 / 10,
+                               instanceIconRect.top(),
+                               updateSide,
+                               updateSide);
+        QIcon::fromTheme("checkupdate").paint(painter, updateRect, Qt::AlignCenter, mode, state);
+    }
 }
 
 static QSize viewItemTextSize(const QStyleOptionViewItem* option)
@@ -310,7 +317,10 @@ void ListViewDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
     // FIXME: this really has no business of being here. Make generic.
     auto instance = (BaseInstance*)index.data(InstanceList::InstancePointerRole).value<void*>();
     if (instance) {
-        drawBadges(painter, opt, instance, mode, state);
+        QRect instanceIconRect = iconbox;
+        instanceIconRect.setWidth(iconSize);
+        instanceIconRect.moveCenter(iconbox.center());
+        drawBadges(painter, opt, instance, instanceIconRect, mode, state);
     }
 
     drawProgressOverlay(painter, opt, index.data(InstanceViewRoles::ProgressValueRole).toInt(),

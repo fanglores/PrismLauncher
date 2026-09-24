@@ -38,11 +38,11 @@ class ActionButton : public QToolButton {
             setMenu(m_action->menu());
             setChecked(m_action->isChecked());
             setCheckable(m_action->isCheckable());
-            setText(m_action->text());
-            setIcon(m_action->icon());
-            setToolTip(m_action->toolTip());
-            setHidden(!m_action->isVisible());
         }
+        setText(m_action->text());
+        setIcon(m_action->icon());
+        setToolTip(m_action->toolTip());
+        setHidden(!m_action->isVisible());
         setFocusPolicy(Qt::NoFocus);
     }
 
@@ -126,13 +126,22 @@ void WideBar::insertActionAfter(QAction* after, QAction* action)
     m_entries.insert(iter, entry);
 }
 
-void WideBar::insertWidgetBefore(QAction* before, QWidget* widget)
+QAction* WideBar::insertWidgetBefore(QAction* before, QWidget* widget)
 {
     auto iter = getMatching(before);
     if (iter == m_entries.end())
-        return;
+        return nullptr;
 
-    insertWidget(iter->bar_action, widget);
+    return insertWidget(iter->bar_action, widget);
+}
+
+void WideBar::setActionVisible(QAction* action, bool visible)
+{
+    auto iter = getMatching(action);
+    if (iter != m_entries.end()) {
+        iter->bar_action->setVisible(visible);
+    }
+    action->setVisible(visible);
 }
 
 void WideBar::insertSpacer(QAction* action)
@@ -150,17 +159,18 @@ void WideBar::insertSpacer(QAction* action)
     m_entries.insert(iter, entry);
 }
 
-void WideBar::insertSeparator(QAction* before)
+QAction* WideBar::insertSeparator(QAction* before)
 {
     auto iter = getMatching(before);
     if (iter == m_entries.end())
-        return;
+        return nullptr;
 
     BarEntry entry;
     entry.bar_action = QToolBar::insertSeparator(iter->bar_action);
     entry.type = BarEntry::Type::Separator;
 
     m_entries.insert(iter, entry);
+    return entry.bar_action;
 }
 
 QMenu* WideBar::createContextMenu(QWidget* parent, const QString& title)

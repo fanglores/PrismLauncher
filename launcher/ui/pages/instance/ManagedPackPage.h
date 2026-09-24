@@ -13,6 +13,7 @@
 
 #include "ui/pages/BasePage.h"
 
+#include <QUrl>
 #include <QWidget>
 
 namespace Ui {
@@ -64,6 +65,8 @@ class ManagedPackPage : public QWidget, public BasePage {
     virtual void update() {};
     virtual void updateFromFile() {};
 
+    void updatePack(const QUrl& url, bool trusted, const QString& versionID = {}, const QString& versionName = {});
+
    protected slots:
     /** Does the necessary UI changes for when something failed.
      *
@@ -83,8 +86,6 @@ class ManagedPackPage : public QWidget, public BasePage {
      *  Returns whether the task was successful.
      */
     bool runUpdateTask(InstanceTask*);
-
-    void updatePack(const QUrl& url, bool trusted, const QString& versionID = {}, const QString& versionName = {});
 
     void onUpdateTaskCompleted(bool didSucceed) const;
 
