@@ -45,10 +45,10 @@
 
 #include <QMainWindow>
 #include <QProcess>
-#include <QTimer>
 #include <QUrl>
 
 #include "minecraft/auth/MinecraftAccount.h"
+#include "modplatform/ManagedPackUpdateScheduler.h"
 #include "tasks/Task.h"
 
 class QAction;
@@ -239,7 +239,6 @@ class MainWindow : public QMainWindow {
     void checkManagedPackUpdates();
     void startManagedPackUpdateTask(const QList<MinecraftInstance*>& instances, bool forceRefresh);
     void updateManagedPackAction();
-    void scheduleManagedPackUpdateChecks();
 
     void runModalTask(Task* task);
     void instanceFromInstanceTask(InstanceTask* task);
@@ -273,12 +272,12 @@ class MainWindow : public QMainWindow {
         QString versionID;
         QUrl downloadUrl;
         qint64 lastChecked = 0;
+        bool lastCheckFailed = false;
     };
 
     std::map<QString, ManagedPackUpdate> m_managedPackUpdates;
     Task::Ptr m_managedPackUpdateTask;
-    std::map<QString, qint64> m_managedPackUpdateExpirations;
-    QTimer m_managedPackUpdateCacheTimer;
+    ManagedPackUpdateScheduler m_managedPackUpdateScheduler;
 
     // managed by the application object
     Task* m_versionLoadTask = nullptr;

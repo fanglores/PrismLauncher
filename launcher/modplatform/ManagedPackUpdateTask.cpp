@@ -8,13 +8,13 @@
 #include <QTimer>
 
 #include "Application.h"
+#include "modplatform/ManagedPackUpdateScheduler.h"
 #include "modplatform/ModIndex.h"
 #include "modplatform/ResourceAPI.h"
 #include "modplatform/flame/FlameAPI.h"
 #include "modplatform/modrinth/ModrinthAPI.h"
 
 namespace {
-constexpr qint64 kCacheLifetimeSecs = 12 * 60 * 60;
 constexpr int kRemoteRequestIntervalMs = 2000;
 
 QString cacheKey(const QString& type, const QString& packId)
@@ -84,12 +84,11 @@ void ManagedPackUpdateTask::checkNext()
 
     ResourceAPI::Callback<QVector<ModPlatform::IndexedVersion>> callbacks{};
     callbacks.onSucceed = [this, project, entry](auto& versions) {
-        entry->setMaximumAge(kCacheLifetimeSecs);
+        entry->setMaximumAge(ManagedPackUpdateScheduler::CacheLifetimeSecs);
         APPLICATION->metacache()->SaveEventually();
         const auto cachedAt = QFileInfo(entry->getFullPath()).lastModified().toSecsSinceEpoch();
         const auto checkedAt = m_currentRequestIsRemote || cachedAt <= 0 ? QDateTime::currentSecsSinceEpoch() : cachedAt;
-        const auto expiresAt = checkedAt + kCacheLifetimeSecs;
-        emit cacheUpdated(cacheKey(project.type, project.packId), expiresAt);
+        emit cacheUpdated(cacheKey(project.type, project.packId), checkedAt);
 
         for (const auto& instance : project.instances) {
             if (versions.isEmpty()) {
@@ -103,18 +102,15 @@ void ManagedPackUpdateTask::checkNext()
         }
         finishCurrent();
     };
-    callbacks.onFail = [this, project](const QString&, int) {
+    const auto failProject = [this, project] {
+        emit projectFailed(cacheKey(project.type, project.packId), QDateTime::currentSecsSinceEpoch());
         for (const auto& instance : project.instances) {
             emit checkFailed(instance.id);
         }
         finishCurrent();
     };
-    callbacks.onAbort = [this, project] {
-        for (const auto& instance : project.instances) {
-            emit checkFailed(instance.id);
-        }
-        finishCurrent();
-    };
+    callbacks.onFail = [failProject](const QString&, int) { failProject(); };
+    callbacks.onAbort = failProject;
 
     const ResourceAPI::VersionSearchArgs args{
         .pack = std::make_shared<ModPlatform::IndexedPack>(ModPlatform::IndexedPack{ .addonId = project.packId }),

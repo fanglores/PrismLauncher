@@ -37,7 +37,8 @@ class ManagedPackUpdateTask final : public Task {
    signals:
     void updateChecked(QString instanceId, bool available, QString version, QString versionId, QUrl downloadUrl, qint64 checkedAt);
     void checkFailed(QString instanceId);
-    void cacheUpdated(QString cacheKey, qint64 expiresAt);
+    void cacheUpdated(QString cacheKey, qint64 checkedAt);
+    void projectFailed(QString cacheKey, qint64 checkedAt);
 
    private:
     friend class ManagedPackUpdateTaskTest;

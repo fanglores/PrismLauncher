@@ -42,6 +42,9 @@ ecm_add_test(Task_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::
 ecm_add_test(ManagedPackUpdateTask_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ManagedPackUpdateTask)
 
+ecm_add_test(ManagedPackUpdateScheduler_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ManagedPackUpdateScheduler)
+
 ecm_add_test(INIFile_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME INIFile)
 

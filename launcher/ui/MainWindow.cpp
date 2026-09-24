@@ -72,10 +72,11 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTimer>
 #include <QWidget>
 #include <QWidgetAction>
-#include <limits>
 #include <memory>
+#include <set>
 
 #include <BaseInstance.h>
 #include <BuildConfig.h>
@@ -155,8 +156,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
 {
     ui->setupUi(this);
 
-    m_managedPackUpdateCacheTimer.setSingleShot(true);
-    connect(&m_managedPackUpdateCacheTimer, &QTimer::timeout, this, [this] { checkManagedPackUpdates(); });
+    m_managedPackUpdateScheduler.setCacheDirectory(APPLICATION->metacache()->getBasePath("ManagedPackUpdates"));
+    connect(&m_managedPackUpdateScheduler, &ManagedPackUpdateScheduler::checkDue, this, &MainWindow::checkManagedPackUpdates);
 
     setWindowIcon(APPLICATION->logo());
     setWindowTitle(APPLICATION->applicationDisplayName());
@@ -189,8 +190,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         ui->instanceToolBar->insertWidgetBefore(ui->actionLaunchInstance, renameButton);
 
         m_managedPackLastCheckedLabel = new QLabel(this);
-        m_managedPackLastCheckedLabel->setStyleSheet("color: palette(mid);");
-        m_managedPackLastCheckedLabel->setWordWrap(true);
+        m_managedPackLastCheckedLabel->setStyleSheet("color: #909090; padding-right: 12px;");
+        m_managedPackLastCheckedLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         m_managedPackLastCheckedAction =
             ui->instanceToolBar->insertWidgetBefore(ui->actionUpdateManagedPackFromFile, m_managedPackLastCheckedLabel);
         m_managedPackLastCheckedAction->setVisible(false);
@@ -1889,9 +1890,12 @@ void MainWindow::updateManagedPackAction()
     ui->actionCheckManagedPackUpdates->setEnabled(status != ManagedPackUpdate::Status::Checking &&
                                                     !m_managedPackUpdateTask);
     const auto lastChecked = it == m_managedPackUpdates.end() ? 0 : it->second.lastChecked;
-    const auto checkedAt = lastChecked == 0
-                               ? tr("never")
-                               : QLocale().toString(QDateTime::fromSecsSinceEpoch(lastChecked).toLocalTime(), QLocale::ShortFormat);
+    QString checkedAt = tr("never");
+    if (it != m_managedPackUpdates.end() && it->second.lastCheckFailed) {
+        checkedAt = tr("failed");
+    } else if (lastChecked != 0) {
+        checkedAt = QLocale().toString(QDateTime::fromSecsSinceEpoch(lastChecked).toLocalTime(), QLocale::ShortFormat);
+    }
     m_managedPackLastCheckedLabel->setText(tr("Last checked: %1").arg(checkedAt));
     m_managedPackLastCheckedAction->setVisible(true);
 
@@ -1923,6 +1927,7 @@ void MainWindow::checkManagedPackUpdates()
     }
 
     QList<MinecraftInstance*> instances;
+    std::set<QString> cacheKeys;
     const auto now = QDateTime::currentSecsSinceEpoch();
     for (int i = 0; i < APPLICATION->instances()->count(); ++i) {
         auto* instance = APPLICATION->instances()->at(i);
@@ -1935,20 +1940,34 @@ void MainWindow::checkManagedPackUpdates()
         }
 
         const auto cacheKey = type + '/' + instance->getManagedPackID();
-        if (m_managedPackUpdateExpirations.contains(cacheKey) && m_managedPackUpdateExpirations.at(cacheKey) > now) {
+        cacheKeys.insert(cacheKey);
+        const auto cached = m_managedPackUpdateScheduler.result(cacheKey);
+        const bool checkDue = m_managedPackUpdateScheduler.needsCheck(cacheKey, now);
+        if (cached && !cached->success && !checkDue) {
+            auto& update = m_managedPackUpdates[instance->id()];
+            update.status = ManagedPackUpdate::Status::Failed;
+            update.lastChecked = cached->checkedAt;
+            update.lastCheckFailed = true;
+            instance->setUpdateAvailable(false);
+            if (instance == m_selectedInstance) {
+                updateManagedPackAction();
+            }
+            continue;
+        }
+        if (m_managedPackUpdates.contains(instance->id()) && !checkDue) {
             continue;
         }
 
         instances.append(instance);
     }
 
+    m_managedPackUpdateScheduler.retainProjects(cacheKeys);
     startManagedPackUpdateTask(instances, false);
 }
 
 void MainWindow::startManagedPackUpdateTask(const QList<MinecraftInstance*>& instances, bool forceRefresh)
 {
     if (instances.isEmpty()) {
-        scheduleManagedPackUpdateChecks();
         return;
     }
 
@@ -1981,7 +2000,8 @@ void MainWindow::startManagedPackUpdateTask(const QList<MinecraftInstance*>& ins
                 }
                 auto& update = m_managedPackUpdates[instanceID];
                 update = { .status = available ? ManagedPackUpdate::Status::Available : ManagedPackUpdate::Status::NoUpdates,
-                           .version = version, .versionID = versionID, .downloadUrl = url, .lastChecked = checkedAt };
+                           .version = version, .versionID = versionID, .downloadUrl = url, .lastChecked = checkedAt,
+                           .lastCheckFailed = false };
                 instance->setUpdateAvailable(available);
                 if (instance == m_selectedInstance) {
                     updateManagedPackAction();
@@ -1995,43 +2015,30 @@ void MainWindow::startManagedPackUpdateTask(const QList<MinecraftInstance*>& ins
         auto& update = m_managedPackUpdates[instanceID];
         update.status = ManagedPackUpdate::Status::Failed;
         update.lastChecked = QDateTime::currentSecsSinceEpoch();
-        m_managedPackUpdateExpirations[instance->getManagedPackType() + '/' + instance->getManagedPackID()] =
-            QDateTime::currentSecsSinceEpoch() + 5 * 60;
+        update.lastCheckFailed = true;
         instance->setUpdateAvailable(false);
         if (instance == m_selectedInstance) {
             updateManagedPackAction();
         }
     });
-    connect(task.get(), &ManagedPackUpdateTask::cacheUpdated, this, [this](const QString& cacheKey, qint64 expiresAt) {
-        m_managedPackUpdateExpirations[cacheKey] = expiresAt;
+    connect(task.get(), &ManagedPackUpdateTask::cacheUpdated, this, [this](const QString& cacheKey, qint64 checkedAt) {
+        m_managedPackUpdateScheduler.recordResult(cacheKey, true, checkedAt);
+    });
+    connect(task.get(), &ManagedPackUpdateTask::projectFailed, this, [this](const QString& cacheKey, qint64 checkedAt) {
+        m_managedPackUpdateScheduler.recordResult(cacheKey, false, checkedAt);
     });
     connect(task.get(), &Task::finished, this, [this] {
         QTimer::singleShot(0, this, [this] {
             m_managedPackUpdateTask.reset();
             updateManagedPackAction();
-            scheduleManagedPackUpdateChecks();
+            m_managedPackUpdateScheduler.setBusy(false);
         });
     });
 
     m_managedPackUpdateTask = task;
-    m_managedPackUpdateCacheTimer.stop();
+    m_managedPackUpdateScheduler.setBusy(true);
     updateManagedPackAction();
     task->start();
-}
-
-void MainWindow::scheduleManagedPackUpdateChecks()
-{
-    if (m_managedPackUpdateExpirations.empty() || m_managedPackUpdateTask) {
-        m_managedPackUpdateCacheTimer.stop();
-        return;
-    }
-
-    const auto now = QDateTime::currentSecsSinceEpoch();
-    const auto nextExpiry = std::ranges::min_element(m_managedPackUpdateExpirations, {}, [](const auto& entry) {
-                                return entry.second;
-                            })->second;
-    const auto intervalMs = std::min<qint64>(std::numeric_limits<int>::max(), std::max<qint64>(0, nextExpiry - now) * 1000);
-    m_managedPackUpdateCacheTimer.start(static_cast<int>(intervalMs));
 }
 
 void MainWindow::refreshCurrentInstance()

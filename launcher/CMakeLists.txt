@@ -487,6 +487,8 @@ set(API_SOURCES
 
     modplatform/ManagedPackUpdateTask.h
     modplatform/ManagedPackUpdateTask.cpp
+    modplatform/ManagedPackUpdateScheduler.h
+    modplatform/ManagedPackUpdateScheduler.cpp
 
     modplatform/CheckUpdateTask.h
 
